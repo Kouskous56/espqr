@@ -1,10 +1,11 @@
 /*
- * QR Web Server - ESP32 (Flag-based, PROGMEM HTML, base64 modules)
- * - Web handler: nhận URL → gán g_pendingUrl, g_doQR=true → trả 202
- * - loop(): nếu g_doQR → sinh QR + vẽ OLED + lưu kết quả → g_doQR=false
- * - Client: POST /api/qr → 202, poll /api/qr/status → JSON
+ * QR Web Server - ESP32 + OLED SSD1306 0.96" I2C (128x64)
+ * - Web: nhận URL -> sinh QR -> hiện lên OLED + trả kết quả
+ * - Chân: VCC=3V3, GND=GND, SCL=22, SDA=21, addr 0x3C
+ * - State machine + pickVersion (KHÔNG dùng version 0 -> tránh crash thư viện)
  */
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include <WebServer.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -20,15 +21,14 @@
 #define PIN_SCL 22
 
 #define MAX_QR_VERSION 8
-#define MAX_QR_MODULES (4 * MAX_QR_VERSION + 17)  // 49
-#define MAX_QR_DATA 120
+#define MAX_QR_MODULES (4 * MAX_QR_VERSION + 17)   // 49
+#define QR_BUF_SIZE    ((MAX_QR_MODULES * MAX_QR_MODULES + 7) / 8)  // 301 bytes
+#define MAX_QR_DATA    120
 
 // ======= BIẾN TOÀN CỤC =======
 WebServer server(80);
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
-// Flag-based QR
-volatile bool g_doQR = false;
 char g_pendingUrl[MAX_QR_DATA + 1];
 
 struct QrResult {
@@ -63,7 +63,7 @@ const char index_html[] PROGMEM = R"rawliteral(
   <h1>QR Code Generator</h1>
   <p class='sub'>Nhập link → hiển thị QR lên OLED & web</p>
   <form id='qrForm'>
-    <input type='url' name='url' placeholder='https://example.com' autofocus required>
+    <input type='url' name='url' placeholder='https://example.com' autofocus required maxlength='120'>
     <button type='submit'>Tạo QR</button>
   </form>
   <div id='status' class='status hidden'></div>
@@ -119,7 +119,8 @@ async function pollStatus() {
         document.getElementById('qrBox').innerHTML = renderQR(data.size, data.b64);
         document.getElementById('linkBox').textContent = data.url;
         document.getElementById('lastCard').classList.remove('hidden');
-        status.textContent = 'Đã tạo QR cho: ' + data.url;
+        const ver = (data.size - 17) / 4;
+        status.textContent = 'Đã tạo QR v' + ver + ' (' + data.size + 'x' + data.size + '): ' + data.url;
         return;
       }
       status.textContent = 'Đang tạo QR... (' + i + 's)';
@@ -168,7 +169,7 @@ void sendJSON(int code, const String& json) {
 String modulesToBase64(const uint8_t* modules, int size) {
   int bits = size * size;
   int bytes = (bits + 7) / 8;
-  uint8_t buf[301];
+  uint8_t buf[QR_BUF_SIZE];
   memset(buf, 0, bytes);
   for (int i = 0; i < bits; i++) {
     if (modules[i]) buf[i >> 3] |= (1 << (7 - (i & 7)));
@@ -186,11 +187,21 @@ String modulesToBase64(const uint8_t* modules, int size) {
   return out;
 }
 
-enum QrState { QR_IDLE, QR_GEN, QR_COPY, QR_DRAW, QR_DONE };
+// Escape URL để nhúng an toàn vào JSON
+String jsonEscape(const char* s) {
+  String out;
+  for (const char* p = s; *p; p++) {
+    if (*p == '"' || *p == '\\') out += '\\';
+    out += *p;
+  }
+  return out;
+}
+
+enum QrState { QR_IDLE, QR_GEN, QR_COPY, QR_DRAW };
 QrState g_qrState = QR_IDLE;
 int g_qrRow = 0;
 QRCode g_qrcode;
-uint8_t g_qrData[301];   // version 8 = 49 modules -> (49*49+7)/8 = 301 bytes
+uint8_t g_qrData[QR_BUF_SIZE];
 
 // Chọn version QR (1..8) vừa đủ chứa chuỗi, trả 0 nếu quá dài.
 // Dung lượng byte-mode ECC_LOW theo chuẩn QR (version 1..8)
@@ -226,6 +237,33 @@ void drawUrlOnLeft(const char* url, int maxW) {
   }
 }
 
+// Màn hình lỗi trên OLED
+void drawOledError(const char* msg) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextWrap(false);
+  display.setCursor(4, 6);
+  display.println("ERROR");
+  display.drawFastHLine(0, 15, SCREEN_WIDTH, SSD1306_WHITE);
+  display.setCursor(4, 20);
+  int lineCap = (SCREEN_WIDTH - 8) / 6;   // 20 ký tự/dòng
+  int len = strlen(msg);
+  int y = 20;
+  char buf[32];
+  for (int i = 0; i < len && y < SCREEN_HEIGHT - 4;) {
+    int n = len - i;
+    if (n > lineCap) n = lineCap;
+    memcpy(buf, msg + i, n);
+    buf[n] = 0;
+    display.setCursor(4, y);
+    display.print(buf);
+    y += 8;
+    i += n;
+  }
+  display.display();
+}
+
 // Chạy một bước nhỏ của QR generation trong loop()
 void qrStep() {
   switch (g_qrState) {
@@ -237,6 +275,7 @@ void qrStep() {
         g_result.error = true;
         strlcpy(g_result.url, "QR too long", sizeof(g_result.url));
         g_result.ready = true;
+        drawOledError("Link qua dai!");
         g_qrState = QR_IDLE;
         return;
       }
@@ -246,6 +285,7 @@ void qrStep() {
         g_result.error = true;
         strlcpy(g_result.url, "QR error", sizeof(g_result.url));
         g_result.ready = true;
+        drawOledError("QR loi khi tao!");
         g_qrState = QR_IDLE;
         return;
       }
@@ -319,9 +359,9 @@ void handleAPI() {
 
 void handleStatus() {
   if (!g_result.ready) { sendJSON(200, "{\"ready\":false}"); return; }
-  if (g_result.error) { sendJSON(200, "{\"ready\":true,\"error\":\"" + String(g_result.url) + "\"}"); return; }
+  if (g_result.error) { sendJSON(200, "{\"ready\":true,\"error\":\"" + jsonEscape(g_result.url) + "\"}"); return; }
   String b64 = modulesToBase64(g_result.modules, g_result.size);
-  String json = "{\"ready\":true,\"size\":" + String(g_result.size) + ",\"url\":\"" + String(g_result.url) + "\",\"b64\":\"" + b64 + "\"}";
+  String json = "{\"ready\":true,\"size\":" + String(g_result.size) + ",\"url\":\"" + jsonEscape(g_result.url) + "\",\"b64\":\"" + b64 + "\"}";
   sendJSON(200, json);
 }
 
@@ -379,11 +419,25 @@ void setup() {
   server.on("/api/qr/status", HTTP_GET, handleStatus);
   server.onNotFound(handleNotFound);
   server.begin();
+
+  // mDNS: truy cập qua http://espqr.local
+  if (MDNS.begin("espqr")) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.println("mDNS started: http://espqr.local");
+  }
+
+  WiFi.setSleep(false);   // giảm latency cho web server
   Serial.println("HTTP server started");
 }
 
-// ======= LOOP: xử lý QR theo state machine =======
+// ======= LOOP: xử lý QR theo state machine + auto-reconnect WiFi =======
 void loop() {
+  static unsigned long lastReconnect = 0;
+  if (WiFi.status() != WL_CONNECTED && millis() - lastReconnect > 10000) {
+    lastReconnect = millis();
+    Serial.println("WiFi lost, reconnecting...");
+    WiFi.reconnect();
+  }
   server.handleClient();
   if (g_qrState != QR_IDLE) {
     qrStep();

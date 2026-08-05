@@ -5,6 +5,7 @@
  * - Cấu trúc giữ nguyên qrweb (state machine, pickVersion) đã fix crash
  */
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include <WebServer.h>
 #include <SPI.h>
 #include <Adafruit_GFX.h>
@@ -24,8 +25,9 @@
 #define TFT_BL   21
 
 #define MAX_QR_VERSION 8
-#define MAX_QR_MODULES (4 * MAX_QR_VERSION + 17)  // 49
-#define MAX_QR_DATA 120
+#define MAX_QR_MODULES (4 * MAX_QR_VERSION + 17)   // 49
+#define QR_BUF_SIZE    ((MAX_QR_MODULES * MAX_QR_MODULES + 7) / 8)  // 301 bytes
+#define MAX_QR_DATA    120
 
 // ======= BIẾN TOÀN CỤC =======
 WebServer server(80);
@@ -44,9 +46,7 @@ void setupColors() {
   C_ERR   = tft.color565(255, 95, 95);  // đỏ lỗi
 }
 
-volatile bool g_doQR = false;
 char g_pendingUrl[MAX_QR_DATA + 1];
-
 struct QrResult {
   int size = 0;
   char url[MAX_QR_DATA + 1];
@@ -79,7 +79,7 @@ const char index_html[] PROGMEM = R"rawliteral(
   <h1>QR Code Generator</h1>
   <p class='sub'>Nhập link → hiển thị QR lên TFT & web</p>
   <form id='qrForm'>
-    <input type='url' name='url' placeholder='https://example.com' autofocus required>
+    <input type='url' name='url' placeholder='https://example.com' autofocus required maxlength='120'>
     <button type='submit'>Tạo QR</button>
   </form>
   <div id='status' class='status hidden'></div>
@@ -135,7 +135,8 @@ async function pollStatus() {
         document.getElementById('qrBox').innerHTML = renderQR(data.size, data.b64);
         document.getElementById('linkBox').textContent = data.url;
         document.getElementById('lastCard').classList.remove('hidden');
-        status.textContent = 'Đã tạo QR cho: ' + data.url;
+        const ver = (data.size - 17) / 4;
+        status.textContent = 'Đã tạo QR v' + ver + ' (' + data.size + 'x' + data.size + '): ' + data.url;
         return;
       }
       status.textContent = 'Đang tạo QR... (' + i + 's)';
@@ -184,7 +185,7 @@ void sendJSON(int code, const String& json) {
 String modulesToBase64(const uint8_t* modules, int size) {
   int bits = size * size;
   int bytes = (bits + 7) / 8;
-  uint8_t buf[301];
+  uint8_t buf[QR_BUF_SIZE];
   memset(buf, 0, bytes);
   for (int i = 0; i < bits; i++) {
     if (modules[i]) buf[i >> 3] |= (1 << (7 - (i & 7)));
@@ -202,11 +203,21 @@ String modulesToBase64(const uint8_t* modules, int size) {
   return out;
 }
 
-enum QrState { QR_IDLE, QR_GEN, QR_COPY, QR_DRAW, QR_DONE };
+// Escape URL để nhúng an toàn vào JSON
+String jsonEscape(const char* s) {
+  String out;
+  for (const char* p = s; *p; p++) {
+    if (*p == '"' || *p == '\\') out += '\\';
+    out += *p;
+  }
+  return out;
+}
+
+enum QrState { QR_IDLE, QR_GEN, QR_COPY, QR_DRAW };
 QrState g_qrState = QR_IDLE;
 int g_qrRow = 0;
 QRCode g_qrcode;
-uint8_t g_qrData[301];   // version 8 = 49 modules -> (49*49+7)/8 = 301 bytes
+uint8_t g_qrData[QR_BUF_SIZE];
 
 // Chọn version QR (1..8) vừa đủ chứa chuỗi, trả 0 nếu quá dài.
 // Dung lượng byte-mode ECC_LOW theo chuẩn QR (version 1..8)
@@ -431,9 +442,9 @@ void handleAPI() {
 
 void handleStatus() {
   if (!g_result.ready) { sendJSON(200, "{\"ready\":false}"); return; }
-  if (g_result.error) { sendJSON(200, "{\"ready\":true,\"error\":\"" + String(g_result.url) + "\"}"); return; }
+  if (g_result.error) { sendJSON(200, "{\"ready\":true,\"error\":\"" + jsonEscape(g_result.url) + "\"}"); return; }
   String b64 = modulesToBase64(g_result.modules, g_result.size);
-  String json = "{\"ready\":true,\"size\":" + String(g_result.size) + ",\"url\":\"" + String(g_result.url) + "\",\"b64\":\"" + b64 + "\"}";
+  String json = "{\"ready\":true,\"size\":" + String(g_result.size) + ",\"url\":\"" + jsonEscape(g_result.url) + "\",\"b64\":\"" + b64 + "\"}";
   sendJSON(200, json);
 }
 
@@ -484,11 +495,25 @@ void setup() {
   server.on("/api/qr/status", HTTP_GET, handleStatus);
   server.onNotFound(handleNotFound);
   server.begin();
+
+  // mDNS: truy cập qua http://espqr.local
+  if (MDNS.begin("espqr")) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.println("mDNS started: http://espqr.local");
+  }
+
+  WiFi.setSleep(false);   // giảm latency cho web server
   Serial.println("HTTP server started");
 }
 
-// ======= LOOP: xử lý QR theo state machine =======
+// ======= LOOP: xử lý QR theo state machine + auto-reconnect WiFi =======
 void loop() {
+  static unsigned long lastReconnect = 0;
+  if (WiFi.status() != WL_CONNECTED && millis() - lastReconnect > 10000) {
+    lastReconnect = millis();
+    Serial.println("WiFi lost, reconnecting...");
+    WiFi.reconnect();
+  }
   server.handleClient();
   if (g_qrState != QR_IDLE) {
     qrStep();

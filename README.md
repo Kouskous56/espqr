@@ -50,9 +50,16 @@ Dự án ESP32 tạo mã QR từ link nhập trên web và hiển thị lên mà
 3. **Cài thư viện**:
    - `QRCodeGenerator` (ricmoo/QRCode)
    - `Adafruit GFX`, `Adafruit SSD1306` (cho `qrweb`), `Adafruit ST7735 and ST7789` (cho `qrweb_tft`)
-4. **Cấu hình WiFi**: copy `wifi_config.example.h` → `wifi_config.h` trong thư mục dự án, điền SSID + password.
+4. **Cấu hình WiFi của bạn**: trong mỗi thư mục dự án (`qrweb/` và `qrweb_tft/`) có file `wifi_config.example.h`. Copy file này thành `wifi_config.h`, sau đó mở ra và thay `YOUR_WIFI_SSID` / `YOUR_WIFI_PASSWORD` bằng SSID và mật khẩu WiFi của bạn:
 
-> ⚠️ `wifi_config.h` đã bị `.gitignore` — **tuyệt đối không commit file này** (chứa mật khẩu).
+   ```cpp
+   // wifi_config.h
+   #pragma once
+   #define WIFI_SSID     "TenWifiCuaBan"
+   #define WIFI_PASSWORD "MatKhauWifiCuaBan"
+   ```
+
+   Dự án không nạp được nếu thiếu `wifi_config.h`.
 
 ## Nạp code
 
@@ -92,5 +99,5 @@ Thư viện `QRCodeGenerator` yêu cầu truyền **version tường minh (1–4
 
 ## Bảo mật
 
-- Mật khẩu WiFi chỉ nằm trong `wifi_config.h` (gitignored)
-- Repo GitHub chỉ chứa `wifi_config.example.h` với placeholder
+- `wifi_config.h` chứa thông tin WiFi của bạn và đã bị `.gitignore` loại khỏi phiên bản theo dõi — hãy giữ thông tin này riêng tư, không chia sẻ hay tải lên nơi công khai.
+- Repo này chỉ chứa `wifi_config.example.h` với placeholder để bạn điền thông tin cá nhân khi clone về máy.

@@ -11,11 +11,9 @@
 #include <Adafruit_ST7735.h>
 #include <Adafruit_ST7789.h>
 #include "QRCodeGenerator.h"
+#include "wifi_config.h"   // SSID/password cá nhân - KHÔNG commit lên git
 
 // ======= CẤU HÌNH =======
-const char* ssid     = "REDACTED_SSID";
-const char* password = "REDACTED_PASSWORD";
-
 #define SCREEN_WIDTH  240
 #define SCREEN_HEIGHT 240
 
@@ -460,7 +458,7 @@ void setup() {
 
   // WiFi
   WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {

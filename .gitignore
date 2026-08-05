@@ -1,0 +1,12 @@
+# WiFi credentials - KHÔNG BAO GIỜ commit
+wifi_config.h
+
+# Arduino build artifacts
+build/
+*.elf
+*.map
+*.bin
+
+# IDE
+.vscode/
+.idea/

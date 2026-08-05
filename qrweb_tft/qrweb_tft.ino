@@ -33,6 +33,19 @@ const char* password = "REDACTED_PASSWORD";
 WebServer server(80);
 Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 
+// ======= MÀU GIAO DIỆN (RGB565) =======
+uint16_t C_BG, C_PANEL, C_ACC, C_TXT, C_SUB, C_OK, C_ERR;
+
+void setupColors() {
+  C_BG    = tft.color565(10, 14, 32);   // nền tối navy
+  C_PANEL = tft.color565(18, 24, 48);   // panel tối
+  C_ACC   = tft.color565(60, 200, 255); // xanh dương accent
+  C_TXT   = tft.color565(235, 240, 255);// chữ chính
+  C_SUB   = tft.color565(130, 145, 180);// chữ phụ
+  C_OK    = tft.color565(80, 255, 150); // xanh OK
+  C_ERR   = tft.color565(255, 95, 95);  // đỏ lỗi
+}
+
 volatile bool g_doQR = false;
 char g_pendingUrl[MAX_QR_DATA + 1];
 
@@ -209,24 +222,112 @@ int pickVersion(const char* s) {
   return 0; // quá dài
 }
 
-// Vẽ link gốc phía trên cùng
-void drawUrlTop(const char* url) {
-  int len = strlen(url);
-  int lineCap = SCREEN_WIDTH / 12;   // font size 2 -> 12px/char
-  if (lineCap < 1) lineCap = 1;
-  int y = 4;
-  char buf[64];
-  tft.setTextSize(2);
-  tft.setTextColor(ST77XX_BLACK);
+// ======= GIAO DIỆN TFT =======
+// Thanh trạng thái trên cùng: tiêu đề trái + trạng thái phải
+void drawStatusBar(const char* right, uint16_t rightColor) {
+  tft.fillRect(0, 0, SCREEN_WIDTH, 22, C_PANEL);
+  tft.drawFastHLine(0, 22, SCREEN_WIDTH, C_ACC);
+  tft.setTextSize(1);
+  tft.setTextColor(C_ACC);
   tft.setTextWrap(false);
-  for (int i = 0; i < len && y < 64;) {
+  tft.setCursor(6, 6);
+  tft.print("ESP32 QR");
+  tft.setTextColor(rightColor);
+  tft.setCursor(SCREEN_WIDTH - 6 - strlen(right) * 6, 6);
+  tft.print(right);
+}
+
+// Màn hình chờ (sau khi khởi động / trước khi có QR)
+void drawHome() {
+  tft.fillScreen(C_BG);
+
+  tft.setTextSize(2);
+  tft.setTextColor(C_ACC);
+  const char* title = "QR GENERATOR";
+  tft.setCursor((SCREEN_WIDTH - strlen(title) * 12) / 2, 56);
+  tft.print(title);
+
+  tft.setTextSize(1);
+  tft.setTextColor(C_SUB);
+  const char* sub = "ESP32  +  ST7789 1.54";
+  tft.setCursor((SCREEN_WIDTH - strlen(sub) * 6) / 2, 88);
+  tft.print(sub);
+
+  tft.drawFastHLine(30, 108, SCREEN_WIDTH - 60, C_PANEL);
+
+  tft.setTextColor(C_TXT);
+  char buf[40];
+  snprintf(buf, sizeof(buf), "IP: %s", WiFi.localIP().toString().c_str());
+  tft.setCursor((SCREEN_WIDTH - strlen(buf) * 6) / 2, 126);
+  tft.print(buf);
+
+  tft.setTextColor(C_SUB);
+  const char* hint1 = "Nhap link tren web";
+  const char* hint2 = "QR hien ra tai day";
+  tft.setCursor((SCREEN_WIDTH - strlen(hint1) * 6) / 2, 148);
+  tft.print(hint1);
+  tft.setCursor((SCREEN_WIDTH - strlen(hint2) * 6) / 2, 158);
+  tft.print(hint2);
+
+  drawStatusBar("STANDBY", C_SUB);
+}
+
+// Panel link dưới cùng, tự xuống dòng
+void drawUrlPanel(const char* url) {
+  int y0 = SCREEN_HEIGHT - 52;
+  int h = 48;
+  tft.fillRoundRect(4, y0, SCREEN_WIDTH - 8, h, 6, C_PANEL);
+  tft.drawRoundRect(4, y0, SCREEN_WIDTH - 8, h, 6, C_ACC);
+
+  tft.setTextSize(1);
+  tft.setTextColor(C_SUB);
+  tft.setTextWrap(false);
+  tft.setCursor(12, y0 + 3);
+  tft.print("LINK");
+
+  int lineCap = (SCREEN_WIDTH - 24) / 6;   // 36 ký tự/dòng
+  int len = strlen(url);
+  int y = y0 + 15;
+  char buf[40];
+  tft.setTextColor(C_TXT);
+  for (int i = 0; i < len && y < y0 + h - 4;) {
     int n = len - i;
     if (n > lineCap) n = lineCap;
     memcpy(buf, url + i, n);
     buf[n] = 0;
-    tft.setCursor(2, y);
+    tft.setCursor(12, y);
     tft.print(buf);
-    y += 20;
+    y += 8;
+    i += n;
+  }
+}
+
+// Màn hình lỗi
+void drawError(const char* msg) {
+  tft.fillScreen(C_BG);
+  drawStatusBar("ERROR", C_ERR);
+
+  tft.setTextSize(2);
+  tft.setTextColor(C_ERR);
+  const char* t = "QR LOI";
+  tft.setCursor((SCREEN_WIDTH - strlen(t) * 12) / 2, 76);
+  tft.print(t);
+
+  tft.setTextSize(1);
+  tft.setTextColor(C_TXT);
+  tft.setTextWrap(false);
+  int lineCap = 36;
+  int len = strlen(msg);
+  int y = 116;
+  char buf[40];
+  for (int i = 0; i < len && y < SCREEN_HEIGHT - 8;) {
+    int n = len - i;
+    if (n > lineCap) n = lineCap;
+    memcpy(buf, msg + i, n);
+    buf[n] = 0;
+    tft.setCursor((SCREEN_WIDTH - n * 6) / 2, y);
+    tft.print(buf);
+    y += 10;
     i += n;
   }
 }
@@ -242,6 +343,7 @@ void qrStep() {
         g_result.error = true;
         strlcpy(g_result.url, "QR too long", sizeof(g_result.url));
         g_result.ready = true;
+        drawError("Link qua dai cho QR");
         g_qrState = QR_IDLE;
         return;
       }
@@ -251,6 +353,7 @@ void qrStep() {
         g_result.error = true;
         strlcpy(g_result.url, "QR error", sizeof(g_result.url));
         g_result.ready = true;
+        drawError("QR loi khi tao");
         g_qrState = QR_IDLE;
         return;
       }
@@ -274,19 +377,24 @@ void qrStep() {
       break;
     }
     case QR_DRAW: {
-      // QR căn giữa phía dưới vùng link, nền trắng, module đen
-      int quiet = 2;
-      int topArea = 64;   // vùng hiển thị link
-      int avail = (SCREEN_HEIGHT - topArea) - 2 * quiet;
-      int scale = avail / g_qrcode.size;
+      // Bố cục: status bar 22px | vùng QR giữa | panel link dưới
+      const int barH = 22;
+      int qrY0 = barH + 6;
+      int qrAreaH = SCREEN_HEIGHT - qrY0 - 56;   // 156
+      int quiet = 2;                              // vùng lặng quanh QR (px)
+      int scale = (qrAreaH - 2 * quiet) / g_qrcode.size;
       if (scale < 1) scale = 1;
       int px = g_qrcode.size * scale;
       int offX = (SCREEN_WIDTH - px) / 2;
-      int offY = topArea + (avail - px) / 2;
+      int offY = qrY0 + (qrAreaH - px) / 2;
 
       if (g_qrRow == 0) {
-        tft.fillScreen(ST77XX_WHITE);
-        drawUrlTop(g_result.url);
+        tft.fillScreen(C_BG);
+        drawStatusBar("READY", C_OK);
+        // nền trắng cho QR + viền accent
+        tft.fillRect(offX - quiet, offY - quiet, px + 2 * quiet, px + 2 * quiet, ST77XX_WHITE);
+        tft.drawRect(offX - quiet, offY - quiet, px + 2 * quiet, px + 2 * quiet, C_ACC);
+        drawUrlPanel(g_result.url);
       }
 
       for (int x = 0; x < g_qrcode.size; x++) {
@@ -343,10 +451,11 @@ void setup() {
 
   tft.init(SCREEN_WIDTH, SCREEN_HEIGHT);
   tft.setRotation(0);
-  tft.fillScreen(ST77XX_BLACK);
+  setupColors();
+  tft.fillScreen(C_BG);
   tft.setTextSize(2);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(10, 100);
+  tft.setTextColor(C_ACC);
+  tft.setCursor(28, 100);
   tft.print("WiFi...");
 
   // WiFi
@@ -358,16 +467,18 @@ void setup() {
     delay(200);
   }
 
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setCursor(10, 100);
   if (WiFi.status() == WL_CONNECTED) {
-    tft.println("Connected!");
-    tft.print(WiFi.localIP());
     Serial.print("IP: ");
     Serial.println(WiFi.localIP());
+    drawHome();
   } else {
-    tft.println("WiFi FAIL");
     Serial.println("WiFi connect failed");
+    tft.fillScreen(C_BG);
+    drawStatusBar("ERROR", C_ERR);
+    tft.setTextSize(2);
+    tft.setTextColor(C_ERR);
+    tft.setCursor(44, 100);
+    tft.print("WiFi FAIL");
   }
 
   server.on("/", HTTP_GET, handleRoot);
